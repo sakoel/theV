@@ -2,14 +2,23 @@ name: Early V alerts
 
 on:
   schedule:
-    # GitHub cron is in UTC and often starts 5-20 min late, so jobs start early and the script waits.
-    - cron: "30 12 * * 1-5"   # morning run: 8:30 ET in summer / 7:30 ET in winter, script waits for 9:30
-    - cron: "15 19 * * 1-5"   # overnight check: 3:15 ET summer / 2:15 ET winter, script waits for 3:50
-  workflow_dispatch:           # "Run workflow" button for manual tests
+    # GitHub's scheduler often starts late or skips runs (especially on new repos), so each job has
+    # 3 start times. Only one copy runs at a time, and the script exits on its own if it starts too late.
+    - cron: "20 12 * * 1-5"   # morning: 8:20 ET summer / 7:20 ET winter
+    - cron: "40 12 * * 1-5"   # morning backup
+    - cron: "5 13 * * 1-5"    # morning backup
+    - cron: "5 19 * * 1-5"    # overnight: 3:05 ET summer / 2:05 ET winter
+    - cron: "25 19 * * 1-5"   # overnight backup
+    - cron: "45 19 * * 1-5"   # overnight backup
+  workflow_dispatch:
     inputs:
       mode:
         description: "test-email, morning, or overnight"
         default: "test-email"
+
+concurrency:
+  group: early-v-${{ (contains(github.event.schedule, ' 19 ') || github.event.inputs.mode == 'overnight') && 'overnight' || 'morning' }}
+  cancel-in-progress: false
 
 jobs:
   alerts:
@@ -28,7 +37,8 @@ jobs:
       - name: Run
         run: |
           MODE="${{ github.event.inputs.mode }}"
+          SCHED="${{ github.event.schedule }}"
           if [ "$MODE" = "test-email" ]; then python early_v.py --test-email
-          elif [ "$MODE" = "overnight" ] || [ "${{ github.event.schedule }}" = "15 19 * * 1-5" ]; then python early_v.py --overnight
+          elif [ "$MODE" = "overnight" ] || [[ "$SCHED" == *" 19 "* ]]; then python early_v.py --overnight
           else python early_v.py
           fi

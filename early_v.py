@@ -307,5 +307,11 @@ if __name__ == "__main__":
     else:
         today = dt.datetime.now(ET).date()
         if today.weekday() >= 5: log("weekend — nothing to do"); sys.exit()
-        if a.overnight: overnight(today, dry=a.dry)
-        else: run(today, dry=a.dry)
+        now_t = dt.datetime.now(ET).time()
+        # backup schedules start this script more than once; a copy that starts too late (or after another finished) exits quietly
+        if a.overnight:
+            if now_t > dt.time(15, 57): log("too late for the overnight check — exiting"); sys.exit()
+            overnight(today, dry=a.dry)
+        else:
+            if now_t > dt.time(9, 50): log("started after 9:50 ET (late or duplicate run) — exiting"); sys.exit()
+            run(today, dry=a.dry)

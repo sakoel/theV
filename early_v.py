@@ -73,6 +73,7 @@ def send_email(subject, body, dry=False):
             log("emailed:", subject); return
         except Exception as e:
             log("email failed:", e); time.sleep(5)
+    raise RuntimeError("could not send email — check the EV_EMAIL_* secrets (Gmail needs an App Password)")
 
 def vwap(x):
     tp = (x.High + x.Low + x.Close) / 3
@@ -240,7 +241,9 @@ def run(day, dry, replay=False):
             if "SPY" in bars and bars["SPY"].index[-1] + pd.Timedelta(minutes=5) >= now - pd.Timedelta(minutes=1): break
             time.sleep(10 if not replay else 0)
         if "SPY" not in bars:
-            log("no market data for today (holiday or data problem) — exiting"); return
+            log("no market data for today (holiday or data problem) — exiting")
+            send_email("Early V: NO DATA today", f"Yahoo returned no 5-min data at {chk.strftime('%H:%M')} ET "
+                       "(market holiday, or Yahoo blocking GitHub's servers). No scan today.", dry); return
         new = [s for s in find_signals(bars, top) if s["ticker"] not in sent]
         made = []
         for s in new:
@@ -301,6 +304,8 @@ if __name__ == "__main__":
     ap.add_argument("--overnight", action="store_true", help="3:50 PM overnight SPY check")
     a = ap.parse_args()
     if a.test_email:
+        if "you@gmail.com" in (EMAIL_FROM, EMAIL_TO) or EMAIL_APP_PASSWORD.startswith("xxxx"):
+            log("EMAIL SECRETS ARE NOT SET (EV_EMAIL_FROM / EV_EMAIL_PASSWORD / EV_EMAIL_TO)"); sys.exit(1)
         send_email("BUY TEST @ $1.23", "Test email from early_v_alerts.py — if you got this, alerts will reach you."); sys.exit()
     if a.replay:
         run(dt.date.fromisoformat(a.replay), dry=True, replay=True)
@@ -309,9 +314,12 @@ if __name__ == "__main__":
         if today.weekday() >= 5: log("weekend — nothing to do"); sys.exit()
         now_t = dt.datetime.now(ET).time()
         # backup schedules start this script more than once; a copy that starts too late (or after another finished) exits quietly
-        if a.overnight:
-            if now_t > dt.time(15, 57): log("too late for the overnight check — exiting"); sys.exit()
-            overnight(today, dry=a.dry)
-        else:
-            if now_t > dt.time(9, 50): log("started after 9:50 ET (late or duplicate run) — exiting"); sys.exit()
-            run(today, dry=a.dry)
+        try:
+            if a.overnight:
+                if now_t > dt.time(15, 57): log("too late for the overnight check — exiting"); sys.exit()
+                overnight(today, dry=a.dry)
+            else:
+                if now_t > dt.time(9, 50): log("started after 9:50 ET (late or duplicate run) — exiting"); sys.exit()
+                run(today, dry=a.dry)
+        except Exception as ex:
+            send_email("Early V crashed", f"{type(ex).__name__}: {ex}\nCheck the Actions log on GitHub.", a.dry); raise

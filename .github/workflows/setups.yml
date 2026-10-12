@@ -1,0 +1,44 @@
+name: Short-term setups alerts
+
+on:
+  schedule:
+    # Times are UTC. Each job has 3 start times because GitHub often starts scheduled runs late.
+    # Only one copy runs at a time; a copy that starts too late (or after another finished) exits quietly.
+    - cron: "45 12 * * 1-5"   # AM job: 8:45 ET summer / 7:45 ET winter
+    - cron: "5 13 * * 1-5"    # AM backup
+    - cron: "20 13 * * 1-5"   # AM backup
+    - cron: "40 15 * * 1-5"   # PM job: 11:40 ET summer / 10:40 ET winter
+    - cron: "50 15 * * 1-5"   # PM backup
+    - cron: "55 15 * * 1-5"   # PM backup
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "status (email the cooldown table), am, or pm"
+        default: "status"
+
+concurrency:
+  group: setups-${{ (contains(github.event.schedule, ' 15 ') || github.event.inputs.mode == 'pm') && 'pm' || 'am' }}
+  cancel-in-progress: false
+
+jobs:
+  alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      EV_EMAIL_FROM: ${{ secrets.EV_EMAIL_FROM }}
+      EV_EMAIL_PASSWORD: ${{ secrets.EV_EMAIL_PASSWORD }}
+      EV_EMAIL_TO: ${{ secrets.EV_EMAIL_TO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yfinance pandas numpy
+      - name: Run
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          SCHED="${{ github.event.schedule }}"
+          if [ "$MODE" = "status" ]; then python -c "import setups as s, datetime as d; s.send_email('Setups status (manual)', s.status_table(s.history(d.datetime.now(s.ET).date())))"
+          elif [ "$MODE" = "pm" ] || [[ "$SCHED" == *" 15 "* ]]; then python setups.py --pm
+          else python setups.py --am
+          fi

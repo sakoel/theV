@@ -314,12 +314,22 @@ if __name__ == "__main__":
         if today.weekday() >= 5: log("weekend — nothing to do"); sys.exit()
         now_t = dt.datetime.now(ET).time()
         # backup schedules start this script more than once; a copy that starts too late (or after another finished) exits quietly
+        manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"   # cron-job.org / Run workflow button
+        stamp = dt.datetime.now(ET).strftime("%H:%M ET")
         try:
             if a.overnight:
-                if now_t > dt.time(15, 57): log("too late for the overnight check — exiting"); sys.exit()
+                if now_t > dt.time(15, 57):
+                    log("too late for the overnight check — exiting")
+                    if manual: send_email("Early V overnight: started too late", f"Started at {stamp}, after the 3:57 cutoff. Skipped today.", a.dry)
+                    sys.exit()
+                send_email("Early V overnight started", f"Overnight SPY check started at {stamp}. Result email at 3:50 PM ET.", a.dry)
                 overnight(today, dry=a.dry)
             else:
-                if now_t > dt.time(9, 50): log("started after 9:50 ET (late or duplicate run) — exiting"); sys.exit()
+                if now_t > dt.time(9, 50):
+                    log("started after 9:50 ET (late or duplicate run) — exiting")
+                    if manual: send_email("Early V: started too late", f"Started at {stamp}, after the 9:50 cutoff. No scan today.", a.dry)
+                    sys.exit()
+                send_email("Early V started", f"Morning scan started at {stamp}. Picks or 'no signals today' by 9:50 ET.", a.dry)
                 run(today, dry=a.dry)
         except Exception as ex:
             send_email("Early V crashed", f"{type(ex).__name__}: {ex}\nCheck the Actions log on GitHub.", a.dry); raise

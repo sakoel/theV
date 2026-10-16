@@ -20,6 +20,9 @@ concurrency:
   group: setups-${{ (contains(github.event.schedule, ' 15 ') || github.event.inputs.mode == 'pm') && 'pm' || 'am' }}
   cancel-in-progress: false
 
+permissions:
+  contents: write   # lets the job save the paper-trading log back to the repo
+
 jobs:
   alerts:
     runs-on: ubuntu-latest
@@ -28,12 +31,16 @@ jobs:
       EV_EMAIL_FROM: ${{ secrets.EV_EMAIL_FROM }}
       EV_EMAIL_PASSWORD: ${{ secrets.EV_EMAIL_PASSWORD }}
       EV_EMAIL_TO: ${{ secrets.EV_EMAIL_TO }}
+      X_API_KEY: ${{ secrets.X_API_KEY }}
+      X_API_SECRET: ${{ secrets.X_API_SECRET }}
+      X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+      X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install yfinance pandas numpy
+      - run: pip install yfinance pandas numpy requests-oauthlib
       - name: Run
         run: |
           MODE="${{ github.event.inputs.mode }}"
@@ -41,4 +48,12 @@ jobs:
           if [ "$MODE" = "status" ]; then python -c "import setups as s, datetime as d; s.send_email('Setups status (manual)', s.status_table(s.history(d.datetime.now(s.ET).date())))"
           elif [ "$MODE" = "pm" ] || [[ "$SCHED" == *" 15 "* ]]; then python setups.py --pm
           else python setups.py --am
+          fi
+      - name: Save paper-trading log
+        if: always()
+        run: |
+          git config user.name "paper-bot"; git config user.email "paper-bot@users.noreply.github.com"
+          git add paper/ 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "paper trades $(date -u +%F)" && (git pull --rebase --autostash && git push) || echo "save failed"
           fi

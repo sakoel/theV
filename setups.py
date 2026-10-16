@@ -21,7 +21,7 @@ Cooldown (checked automatically from each setup's own recent signals, whether yo
   add --dry to print emails instead of sending.
 Research tool only, not financial advice. Nothing here places orders.
 """
-import sys, time, argparse, datetime as dt
+import os, sys, time, argparse, datetime as dt
 import numpy as np, pandas as pd, yfinance as yf
 from early_v import send_email, log, ET
 
@@ -35,6 +35,73 @@ WORST_DD = {("NBIS_945", 1): 7.2, ("NBIS_945", -1): 3.6, ("MU_945", 1): 3.5, ("M
 NAME = {"NBIS_945": "NBIS 9:45 open-direction (exit 10:15)", "MU_945": "MU 9:45 open-direction (exit 15:00)",
         "MARA_1100": "MARA 11:00 open-direction (exit 14:00)", "NBIS_SPIKE": "NBIS 15-min volume spike (exit +30 min)",
         "MU_1H": "MU 1-hour breakout (hold ~2 days)"}
+PAPER_START = 10000.0   # paper account starting balance ($)
+SIZE_PCT = {"NBIS_945": 0.225, "MU_945": 0.50, "MARA_1100": 0.50, "NBIS_SPIKE": 0.225, "MU_1H": 0.425}
+PAPER_DIR = "paper"; WRITE_PAPER = True; TODAY_PAPER = []
+
+def size_frac(S, k, side):
+    lab = S.get((k, side), ("ACTIVE", ""))[0]
+    return SIZE_PCT[k] * (0.5 if lab == "HALF SIZE" else 0 if lab == "COOLDOWN" else 1), lab
+
+def paper_record(S, k, t, side, entry_t, entry, exit_t, exitp):
+    frac, lab = size_frac(S, k, side)
+    ret = side * (exitp / entry - 1) * 100 - COST
+    TODAY_PAPER.append(dict(setup=k, ticker=t, side="LONG" if side == 1 else "SHORT", entry_time=str(entry_t),
+                            entry=round(entry, 4), exit_time=str(exit_t), exit=round(exitp, 4),
+                            ret_pct=round(ret, 3), size_frac=frac, status=lab))
+    note(f"PAPER {t} {NAME[k].split(' (')[0]}: {ret:+.2f}% at {frac*100:.0f}% size")
+
+def paper_all():
+    import glob
+    fs = sorted(glob.glob(f"{PAPER_DIR}/trades_*.csv"))
+    df = pd.concat([pd.read_csv(f) for f in fs], ignore_index=True) if fs else pd.DataFrame()
+    if len(TODAY_PAPER): df = pd.concat([df, pd.DataFrame(TODAY_PAPER)], ignore_index=True)
+    return df.drop_duplicates(["setup", "entry_time"], keep="last").sort_values("exit_time") if len(df) else df
+
+def paper_report():
+    df = paper_all()
+    if not len(df): return "Paper account: no closed trades yet (starts at $%.0f)." % PAPER_START
+    bal = PAPER_START; rows = []
+    for _, r in df.iterrows():
+        pnl = bal * r.size_frac * r.ret_pct / 100; bal += pnl; rows.append(pnl)
+    df = df.assign(pnl=rows); taken = df[df.size_frac > 0]
+    lines = [f"Paper account: ${bal:,.2f} ({(bal/PAPER_START-1)*100:+.1f}% since start, ${PAPER_START:,.0f} start)",
+             f"Closed trades: {len(taken)} | win rate {(taken.ret_pct > 0).mean()*100:.0f}% | avg {taken.ret_pct.mean():+.2f}%" if len(taken) else "",
+             "By setup:"]
+    for k, g in taken.groupby("setup"):
+        lines.append(f"  {NAME[k].split(' (')[0]}: {len(g)} trades, {(g.ret_pct>0).mean()*100:.0f}% win, ${g.pnl.sum():+,.2f}")
+    if TODAY_PAPER:
+        lines.append("Closed in this session:")
+        for r in TODAY_PAPER: lines.append(f"  {r['ticker']} {r['setup']}: {r['ret_pct']:+.2f}% at {r['size_frac']*100:.0f}% size ({r['status']})")
+    return "\n".join(l for l in lines if l)
+
+def paper_save(day, session):
+    import os, subprocess
+    if not WRITE_PAPER: return
+    os.makedirs(PAPER_DIR, exist_ok=True)
+    if TODAY_PAPER:
+        pd.DataFrame(TODAY_PAPER).to_csv(f"{PAPER_DIR}/trades_{day}_{session}.csv", index=False)
+
+def open_mu1h(): 
+    f = f"{PAPER_DIR}/open_mu1h.csv"
+    import os
+    return pd.read_csv(f) if os.path.exists(f) else pd.DataFrame(columns=["entry_time", "entry", "status_frac"])
+
+# ---------------- X (Twitter) posting ----------------
+X_POST = True           # posts only if the 4 X_* secrets are set; set False to turn off
+X_TAG = "(paper)"       # shown on every post
+def x_post(text):
+    keys = [os.environ.get(k, "") for k in ("X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET")]
+    if not X_POST or not all(keys) or not WRITE_PAPER: log("X (not posted):", text); return
+    try:
+        from requests_oauthlib import OAuth1Session
+        r = OAuth1Session(*keys).post("https://api.x.com/2/tweets", json={"text": text[:280]}, timeout=20)
+        log("X posted" if r.status_code in (200, 201) else f"X post failed {r.status_code}: {r.text[:200]}", "|", text)
+    except Exception as e:
+        log("X post error:", e)
+
+SUMMARY = []            # one line per check, emailed as a wrap-up when the job ends
+def note(x): log(x); SUMMARY.append(x)
 WINDOWS = {"NBIS_945": ("NBIS", "09:45", "10:15"), "MU_945": ("MU", "09:45", "15:00"), "MARA_1100": ("MARA", "11:00", "14:00")}
 
 # ---------------- data ----------------
@@ -147,8 +214,10 @@ def tag_size(S, k, side):
     return lab, size
 
 def alert(S, k, side, price, entry_note, exit_note, dry, extra=""):
-    if side == -1 and not SEND_SHORTS: return
+    if side == -1 and not SEND_SHORTS:
+        note(f"{NAME[k]}: bearish signal, no alert (long only)"); return
     lab, size = tag_size(S, k, side)
+    note(f"{NAME[k]}: LONG alert sent @ ~${price:.2f} ({lab})")
     word = "LONG" if side == 1 else "SHORT/PUTS"
     t = WINDOWS.get(k, ("NBIS" if k == "NBIS_SPIKE" else "MU",))[0]
     subj = f"{word} {t} @ ~${price:.2f} | {NAME[k].split(' (')[0]} | {lab}"
@@ -156,13 +225,14 @@ def alert(S, k, side, price, entry_note, exit_note, dry, extra=""):
             f"Setup status: {lab} — {S.get((k, side), ('', ''))[1]}\n{extra}\n"
             "Research tool only, not financial advice.")
     send_email(subj, body, dry)
+    if side == 1 and lab != "COOLDOWN": x_post(f"Bought {t} @ ${price:.2f} {X_TAG}")
 
 def wait_until(day, hhmm, sec=20, replay=False):
     target = dt.datetime.combine(day, dt.time(*map(int, hhmm.split(":"))), ET) + dt.timedelta(seconds=sec)
     if replay: return True
     now = dt.datetime.now(ET)
     if now > target + LATE_OK:
-        log(f"too late for {hhmm} event — skipped"); return False
+        note(f"{hhmm} check skipped (job started late)"); return False
     while dt.datetime.now(ET) < target: time.sleep(5)
     return True
 
@@ -179,9 +249,9 @@ def direction_event(S, k, day, dry, replay):
     if not wait_until(day, T, replay=replay): return
     upto = pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, T.split(":"))), ET))
     o, p = price_now(t, day, upto)
-    if p is None: log(f"no data for {t}"); return
+    if p is None: note(f"{NAME[k]}: no data from Yahoo — no alert"); return
     side = 1 if p > o else -1 if p < o else 0
-    if side == 0: log(f"{t} flat vs open — no trade"); return
+    if side == 0: note(f"{NAME[k]}: flat vs open — no trade"); return
     alert(S, k, side, p, f"{t} is {(p/o-1)*100:+.2f}% vs its 9:30 open (${o:.2f}). Enter now near ${p:.2f}.",
           f"{X} ET (you'll get an EXIT email)", dry)
 
@@ -190,10 +260,12 @@ def exit_event(S, k, day, dry, replay):
     if not wait_until(day, X, sec=0, replay=replay): return
     o, pT = price_now(t, day, pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, T.split(":"))), ET)))
     _, pX = price_now(t, day, pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, X.split(":"))), ET)))
-    if pT is None or pX is None or pT == o: return
+    if pT is None or pX is None or pT == o: note(f"{t} {X} exit: no data"); return
     side = 1 if pT > o else -1
     if side == -1 and not SEND_SHORTS: return
     r = side * (pX / pT - 1) * 100
+    note(f"{t} {X} exit email sent"); x_post(f"Sold {t} @ ${pX:.2f} ({r:+.2f}%) {X_TAG}")
+    paper_record(S, k, t, side, f"{day} {T}", pT, f"{day} {X}", pX)
     send_email(f"EXIT {t} now (~${pX:.2f}) | {NAME[k].split(' (')[0]} {r:+.2f}%",
                f"Close the {'LONG' if side == 1 else 'SHORT/PUTS'} {t} from {T} (entry ~${pT:.2f}). Result about {r:+.2f}%.", dry)
 
@@ -202,7 +274,7 @@ def spike_event(S, day, close_hhmm, dry, replay):
     now = pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, close_hhmm.split(":"))), ET))
     x5 = dl("NBIS", "10d", "5m"); x5 = x5[x5.index + pd.Timedelta(minutes=5) <= now]
     x15 = to15(x5)
-    if not len(x15) or x15.index[-1] + pd.Timedelta(minutes=15) != now: log("15-min bar not ready"); return
+    if not len(x15) or x15.index[-1] + pd.Timedelta(minutes=15) != now: note(f"NBIS {close_hhmm} spike check: bar not ready"); return
     tr = spike_trades(x15)
     if tr and tr[-1][0] == x15.index[-1]:
         _, side, _ = tr[-1]; b = x15.iloc[-1]
@@ -216,11 +288,13 @@ def spike_event(S, day, close_hhmm, dry, replay):
               "if both say the same direction it's ONE trade, don't double the size." if close_hhmm == "09:45" else "")
         return (ex, side, float(b.Close))
 
-def spike_exit(day, pending, dry, replay):
+def spike_exit(day, pending, dry, replay, S=None):
     ex, side, entry = pending
     if not wait_until(day, ex, sec=0, replay=replay): return
     _, p = price_now("NBIS", day, pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, ex.split(":"))), ET)))
     if p is None or (side == -1 and not SEND_SHORTS): return
+    paper_record(S or {}, "NBIS_SPIKE", "NBIS", side, f"{day} spike-exit-{ex}", entry, f"{day} {ex}", p)
+    x_post(f"Sold NBIS @ ${p:.2f} ({side*(p/entry-1)*100:+.2f}%) {X_TAG}")
     send_email(f"EXIT NBIS now (~${p:.2f}) | volume spike {side*(p/entry-1)*100:+.2f}%",
                f"Close the NBIS volume-spike {'LONG' if side == 1 else 'SHORT/PUTS'} (entry ~${entry:.2f}).", dry)
 
@@ -229,7 +303,7 @@ def mu1h_event(S, day, close_hhmm, dry, replay):
     now = pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, close_hhmm.split(":"))), ET))
     h = dl("MU", "730d", "1h")
     h = h[(h.index + pd.Timedelta(hours=1) <= now) | ((h.index.date == day) & (h.index.time == dt.time(15, 30)) & (now.time() >= dt.time(16, 0)))]
-    if not len(h) or h.index[-1].date() != day: log("MU 1h bar not ready"); return
+    if not len(h) or h.index[-1].date() != day: note(f"MU 1h {close_hhmm} check: bar not ready"); return
     tr = mu1h_trades(h)
     if tr and tr[-1][0] == h.index[-1]:
         p = float(h.Close.iloc[-1])
@@ -237,13 +311,42 @@ def mu1h_event(S, day, close_hhmm, dry, replay):
         alert(S, "MU_1H", 1, p,
               f"MU 1-hour bar {h.index[-1].strftime('%H:%M')} closed at ${p:.2f}: above its upper Bollinger Band "
               f"or RSI crossed above 70. Enter now.",
-              f"about {close_hhmm} ET on {ex_day:%a %b %d} (14 hourly bars; no exit email for this one — set a reminder)", dry)
+              f"about {close_hhmm} ET on {ex_day:%a %b %d} (14 hourly bars; the PM job emails the exit when it's due)", dry)
+        if WRITE_PAPER:
+            import os; os.makedirs(PAPER_DIR, exist_ok=True)
+            o = open_mu1h(); frac, _ = size_frac(S, "MU_1H", 1)
+            o = pd.concat([o, pd.DataFrame([dict(entry_time=str(h.index[-1]), entry=p, status_frac=frac)])], ignore_index=True)
+            o.drop_duplicates("entry_time").to_csv(f"{PAPER_DIR}/open_mu1h.csv", index=False)
+
+def close_mu1h(S, day, dry):
+    o = open_mu1h()
+    if not len(o): return
+    h = dl("MU", "60d", "1h"); keep = []
+    for _, r in o.iterrows():
+        et = pd.Timestamp(r.entry_time)
+        if et.tzinfo is None: et = et.tz_localize(ET)
+        idx = list(h.index)
+        if et not in h.index: keep.append(r); continue
+        i = idx.index(et)
+        if i + 14 >= len(h): keep.append(r); continue          # not due yet
+        px = float(h.Close.iloc[i + 14]); ret = (px / r.entry - 1) * 100 - COST
+        TODAY_PAPER.append(dict(setup="MU_1H", ticker="MU", side="LONG", entry_time=r.entry_time, entry=r.entry,
+                                exit_time=str(h.index[i + 14]), exit=px, ret_pct=round(ret, 3), size_frac=r.status_frac, status=""))
+        send_email(f"EXIT MU now (~${px:.2f}) | MU 1-hour breakout {ret:+.2f}%",
+                   f"The MU 1-hour breakout from {r.entry_time} (entry ~${r.entry:.2f}) has reached its 14-hour hold. Sell now.", dry)
+        note(f"MU 1-hour breakout exit sent: {ret:+.2f}%"); x_post(f"Sold MU @ ${px:.2f} ({ret:+.2f}%) {X_TAG}")
+    pd.DataFrame(keep, columns=o.columns).to_csv(f"{PAPER_DIR}/open_mu1h.csv", index=False)
 
 def run(session, day, dry, replay=False):
-    log(f"setups {session} for {day}")
+    log(f"setups {session} for {day}"); SUMMARY.clear()
+    stamp = dt.datetime.now(ET).strftime("%H:%M ET")
     S = history(day)
     if session == "am":
-        send_email(f"Setups status {day:%b %d}", "Today's setup status (cooldown rules in setups.py):\n\n" + status_table(S), dry)
+        send_email(f"Setups AM started {day:%b %d} + status", f"AM job started at {stamp}. Covers 9:45-12:00 ET.\n\n"
+                   "Today's setup status (cooldown rules in setups.py):\n\n" + status_table(S), dry)
+    else:
+        send_email(f"Setups PM started {day:%b %d}", f"PM job started at {stamp}. Covers 12:00-16:00 ET "
+                   "(MU 1h checks, NBIS volume spikes, MARA 14:00 and MU 15:00 exits). Wrap-up email at the end.", dry)
     ev = []
     if session == "am":
         ev += [("09:45", lambda: direction_event(S, "NBIS_945", day, dry, replay)),
@@ -267,11 +370,27 @@ def run(session, day, dry, replay=False):
     done_exits = set()
     for hm, f in sorted(ev, key=lambda e: e[0]):
         for p in [p for p in pending if p[0] <= hm and p[0] not in done_exits]:
-            spike_exit(day, p, dry, replay); done_exits.add(p[0])
+            spike_exit(day, p, dry, replay, S); done_exits.add(p[0])
         try: f()
         except Exception as e: log(f"event {hm} failed:", e)
     for p in [p for p in pending if p[0] not in done_exits]:
-        spike_exit(day, p, dry, replay)
+        spike_exit(day, p, dry, replay, S)
+    if session == "pm" and not replay: close_mu1h(S, day, dry)
+    paper_save(day, session)
+    alerts = [x for x in SUMMARY if "alert sent" in x]
+    quiet = "- NBIS volume spikes: none" if not any("volume spike" in x for x in SUMMARY) else ""
+    quiet += "\n- MU 1-hour breakout: none" if not any("1-hour" in x for x in SUMMARY) else ""
+    if WRITE_PAPER and not replay:
+        import subprocess; subprocess.run(["git", "pull", "--quiet", "--rebase", "--autostash"], check=False)
+    if session == "pm":
+        rep = paper_report().splitlines()[0]
+        if rep.startswith("Paper account: $"):
+            rep = rep.replace("Paper account: ", "")
+            x_post(f"Account: {rep.split(' (')[0]} ({rep.split('(')[1].split(' since')[0]} since start) {X_TAG}")
+    send_email(f"Setups {session.upper()} done: {len(alerts)} alert(s)",
+               f"{session.upper()} job finished at {dt.datetime.now(ET):%H:%M} ET.\n\n" + "\n".join("- " + x for x in SUMMARY)
+               + ("\n" + quiet if quiet else "") + "\n\n" + paper_report()
+               + "\n\nResearch tool only, not financial advice.", dry)
     log("done")
 
 if __name__ == "__main__":
@@ -281,18 +400,22 @@ if __name__ == "__main__":
     ap.add_argument("--replay", help="YYYY-MM-DD (last ~5 days): print what would have fired, no email")
     a = ap.parse_args()
     today = dt.datetime.now(ET).date()
+    if a.dry: WRITE_PAPER = False
     if a.status:
         print(status_table(history(today))); sys.exit()
     if a.replay:
+        WRITE_PAPER = False
         d = dt.date.fromisoformat(a.replay); run("am", d, True, True); run("pm", d, True, True); sys.exit()
     if today.weekday() >= 5: log("weekend"); sys.exit()
     now_t = dt.datetime.now(ET).time()
     try:
-        if a.am:
-            if now_t > dt.time(11, 50): log("started too late (or duplicate run) — exiting"); sys.exit()
-            run("am", today, a.dry)
-        elif a.pm:
-            if now_t > dt.time(15, 55): log("started too late (or duplicate run) — exiting"); sys.exit()
-            run("pm", today, a.dry)
+        manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        late = (a.am and now_t > dt.time(11, 50)) or (a.pm and now_t > dt.time(15, 55))
+        if late:
+            log("started too late (or duplicate run) — exiting")
+            if manual: send_email(f"Setups {'AM' if a.am else 'PM'}: started too late",
+                                  f"Started at {dt.datetime.now(ET):%H:%M} ET, after the cutoff. Skipped today.", a.dry)
+            sys.exit()
+        run("am" if a.am else "pm", today, a.dry)
     except Exception as e:
         send_email("Setups script crashed", f"{type(e).__name__}: {e}", a.dry); raise

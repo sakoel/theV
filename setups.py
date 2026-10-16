@@ -89,7 +89,7 @@ def open_mu1h():
 
 # ---------------- X (Twitter) posting ----------------
 X_POST = True           # posts only if the 4 X_* secrets are set; set False to turn off
-X_TAG = "(paper)"       # shown on every post
+X_TAG = ""       # shown on every post
 def x_post(text):
     keys = [os.environ.get(k, "") for k in ("X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET")]
     if not X_POST or not all(keys) or not WRITE_PAPER: log("X (not posted):", text); return

@@ -46,6 +46,7 @@ jobs:
           MODE="${{ github.event.inputs.mode }}"
           SCHED="${{ github.event.schedule }}"
           if [ "$MODE" = "status" ]; then python -c "import setups as s, datetime as d; s.send_email('Setups status (manual)', s.status_table(s.history(d.datetime.now(s.ET).date())))"
+          elif [ "$MODE" = "x-test" ]; then python -c "import setups as s; s.x_post('Test post from my bot')"
           elif [ "$MODE" = "pm" ] || [[ "$SCHED" == *" 15 "* ]]; then python setups.py --pm
           else python setups.py --am
           fi

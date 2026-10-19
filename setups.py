@@ -25,7 +25,7 @@ import os, sys, time, argparse, datetime as dt
 import numpy as np, pandas as pd, yfinance as yf
 from early_v import send_email, log, ET
 
-SEND_SHORTS = False     # long only. Set True to also get SHORT/PUTS alerts
+SEND_SHORTS = True      # True = also SHORT alerts/posts. False = long only
 COST = 0.05             # % per trade
 LATE_OK = dt.timedelta(minutes=5)   # skip an alert if the job is more than 5 min late for it
 SIZE = {"NBIS_945": "20-25%", "MU_945": "~50%", "MARA_1100": "~50%", "NBIS_SPIKE": "20-25%", "MU_1H": "35-50%"}
@@ -225,7 +225,7 @@ def alert(S, k, side, price, entry_note, exit_note, dry, extra=""):
             f"Setup status: {lab} — {S.get((k, side), ('', ''))[1]}\n{extra}\n"
             "Research tool only, not financial advice.")
     send_email(subj, body, dry)
-    if side == 1 and lab != "COOLDOWN": x_post(f"Bought {t} @ ${price:.2f} {X_TAG}")
+    if lab != "COOLDOWN": x_post(f"{'Bought' if side == 1 else 'Shorted'} {t} @ ${price:.2f} {X_TAG}")
 
 def wait_until(day, hhmm, sec=20, replay=False):
     target = dt.datetime.combine(day, dt.time(*map(int, hhmm.split(":"))), ET) + dt.timedelta(seconds=sec)
@@ -264,7 +264,7 @@ def exit_event(S, k, day, dry, replay):
     side = 1 if pT > o else -1
     if side == -1 and not SEND_SHORTS: return
     r = side * (pX / pT - 1) * 100
-    note(f"{t} {X} exit email sent"); x_post(f"Sold {t} @ ${pX:.2f} ({r:+.2f}%) {X_TAG}")
+    note(f"{t} {X} exit email sent"); x_post(f"{'Sold' if side == 1 else 'Covered'} {t} @ ${pX:.2f} ({r:+.2f}%) {X_TAG}")
     paper_record(S, k, t, side, f"{day} {T}", pT, f"{day} {X}", pX)
     send_email(f"EXIT {t} now (~${pX:.2f}) | {NAME[k].split(' (')[0]} {r:+.2f}%",
                f"Close the {'LONG' if side == 1 else 'SHORT/PUTS'} {t} from {T} (entry ~${pT:.2f}). Result about {r:+.2f}%.", dry)
@@ -276,6 +276,8 @@ def spike_event(S, day, close_hhmm, dry, replay):
     x15 = to15(x5)
     if not len(x15) or x15.index[-1] + pd.Timedelta(minutes=15) != now: note(f"NBIS {close_hhmm} spike check: bar not ready"); return
     tr = spike_trades(x15)
+    if close_hhmm == "09:45" and tr and tr[-1][0] == x15.index[-1]:
+        note("NBIS opening-candle spike = same trade as NBIS 9:45 (not doubled)"); return
     if tr and tr[-1][0] == x15.index[-1]:
         _, side, _ = tr[-1]; b = x15.iloc[-1]
         vr = b.Volume / x15.Volume.tail(20).mean()
@@ -294,7 +296,7 @@ def spike_exit(day, pending, dry, replay, S=None):
     _, p = price_now("NBIS", day, pd.Timestamp(dt.datetime.combine(day, dt.time(*map(int, ex.split(":"))), ET)))
     if p is None or (side == -1 and not SEND_SHORTS): return
     paper_record(S or {}, "NBIS_SPIKE", "NBIS", side, f"{day} spike-exit-{ex}", entry, f"{day} {ex}", p)
-    x_post(f"Sold NBIS @ ${p:.2f} ({side*(p/entry-1)*100:+.2f}%) {X_TAG}")
+    x_post(f"{'Sold' if side == 1 else 'Covered'} NBIS @ ${p:.2f} ({side*(p/entry-1)*100:+.2f}%) {X_TAG}")
     send_email(f"EXIT NBIS now (~${p:.2f}) | volume spike {side*(p/entry-1)*100:+.2f}%",
                f"Close the NBIS volume-spike {'LONG' if side == 1 else 'SHORT/PUTS'} (entry ~${entry:.2f}).", dry)
 

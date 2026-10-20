@@ -1,0 +1,2 @@
+setup,ticker,side,entry_time,entry,exit_time,exit,ret_pct,size_frac,status
+NBIS_945,NBIS,SHORT,2026-10-20 09:45,161.72,2026-10-20 10:15,169.214,-4.684,0.225,ACTIVE

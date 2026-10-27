@@ -1,0 +1,3 @@
+setup,ticker,side,entry_time,entry,exit_time,exit,ret_pct,size_frac,status
+MARA_1100,MARA,LONG,2026-10-27 11:00,7.165,2026-10-27 14:00,7.045,-1.725,0.25,HALF SIZE
+MU_945,MU,LONG,2026-10-27 09:45,922.4001,2026-10-27 15:00,932.6552,1.062,0.5,ACTIVE

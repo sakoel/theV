@@ -1,0 +1,2 @@
+setup,ticker,side,entry_time,entry,exit_time,exit,ret_pct,size_frac,status
+NBIS_945,NBIS,SHORT,2026-10-29 09:45,171.575,2026-10-29 10:15,172.638,-0.67,0.0,COOLDOWN
